@@ -30,6 +30,8 @@ namespace NightLightTray
         private long _lastOpenTicks;
         private long _trackSince;
         private int _idleTicks;
+        private readonly System.Windows.Forms.Timer _closeTimer;
+        private readonly uint _ourPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
 
         private const int OpenDebounceMs = 500;
         private static long NowMs
@@ -64,6 +66,51 @@ namespace NightLightTray
             _pollTimer.Start();
 
             FormClosed += (s, e) => StopHookThread();
+
+            _closeTimer = new System.Windows.Forms.Timer { Interval = 300 };
+            _closeTimer.Tick += OnCloseWatch;
+        }
+
+        private void OnCloseWatch(object sender, EventArgs e)
+        {
+            IntPtr target = Volatile.Read(ref _settingsHwnd);
+            if (target == IntPtr.Zero)
+            {
+                _closeTimer.Stop();
+                return;
+            }
+            if (NowMs - Volatile.Read(ref _trackSince) < 800)
+            {
+                return;
+            }
+            GetWindowThreadProcessId(target, out uint threadId);
+            GUITHREADINFO gti;
+            gti.cbSize = (uint)Marshal.SizeOf(typeof(GUITHREADINFO));
+            gti.flags = 0;
+            gti.hwndActive = IntPtr.Zero;
+            gti.hwndFocus = IntPtr.Zero;
+            gti.hwndCapture = IntPtr.Zero;
+            gti.hwndMenuOwner = IntPtr.Zero;
+            gti.hwndMoveSize = IntPtr.Zero;
+            gti.hwndCaret = IntPtr.Zero;
+            gti.rcCaret = new RECT();
+            if (GetGUIThreadInfo(threadId, out gti))
+            {
+                IntPtr active = gti.hwndActive;
+                if (active != IntPtr.Zero && (active == target || GetAncestor(active, 2) == target))
+                {
+                    return;
+                }
+            }
+            CloseSettings(target);
+        }
+
+        private void CloseSettings(IntPtr target)
+        {
+            Interlocked.Exchange(ref _settingsHwnd, IntPtr.Zero);
+            _closeTimer.Stop();
+            PostMessage(target, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            ScheduleGc();
         }
 
         private void StopHookThread()
@@ -164,24 +211,36 @@ namespace NightLightTray
 
             Thread watcher = new Thread(() =>
             {
-                IntPtr hwnd = WaitForNewWindow(before, 6000);
+                IntPtr hwnd = WaitForNewWindow(before, 8000);
                 if (hwnd == IntPtr.Zero)
                 {
                     return;
                 }
-                if (!IsSettingsProcess(hwnd))
-                {
-                    return;
-                }
-                if (!WaitForWindowReady(hwnd))
+                if (!IsSettingsProcess(hwnd) || !WaitForWindowReady(hwnd))
                 {
                     return;
                 }
                 PositionAboveTray(hwnd);
                 SetSettingsWindow(hwnd);
+                BeginInvoke(new Action(() => FocusWindow(hwnd)));
             });
             watcher.IsBackground = true;
             watcher.Start();
+        }
+
+        private static IntPtr WaitForNewWindow(Dictionary<IntPtr, bool> before, int timeoutMs)
+        {
+            long deadline = NowMs + timeoutMs;
+            while (NowMs < deadline)
+            {
+                IntPtr hwnd = FindNewVisibleWindow(before);
+                if (hwnd != IntPtr.Zero)
+                {
+                    return hwnd;
+                }
+                Thread.Sleep(150);
+            }
+            return IntPtr.Zero;
         }
 
         private static bool IsSettingsProcess(IntPtr hwnd)
@@ -233,6 +292,7 @@ namespace NightLightTray
             EnsureHookThread();
             Interlocked.Exchange(ref _settingsHwnd, hwnd);
             Interlocked.Exchange(ref _trackSince, NowMs);
+            _closeTimer.Start();
         }
 
         private void EnsureHookThread()
@@ -253,13 +313,16 @@ namespace NightLightTray
                 IntPtr foregroundHook = SetWinEventHook(
                     EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
                     IntPtr.Zero, _winEventProcDelegate, 0, 0, WINEVENT_OUTOFCONTEXT);
+                IntPtr activeHook = SetWinEventHook(
+                    EVENT_OBJECT_ACTIVE, EVENT_OBJECT_ACTIVE,
+                    IntPtr.Zero, _winEventProcDelegate, 0, 0, WINEVENT_OUTOFCONTEXT);
                 IntPtr focusHook = SetWinEventHook(
                     EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS,
                     IntPtr.Zero, _winEventProcDelegate, 0, 0, WINEVENT_OUTOFCONTEXT);
                 IntPtr destroyHook = SetWinEventHook(
                     EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
                     IntPtr.Zero, _winEventProcDelegate, 0, 0, WINEVENT_OUTOFCONTEXT);
-                if (foregroundHook == IntPtr.Zero && focusHook == IntPtr.Zero && destroyHook == IntPtr.Zero)
+                if (foregroundHook == IntPtr.Zero && activeHook == IntPtr.Zero && focusHook == IntPtr.Zero && destroyHook == IntPtr.Zero)
                 {
                     return;
                 }
@@ -278,6 +341,10 @@ namespace NightLightTray
                     if (foregroundHook != IntPtr.Zero)
                     {
                         UnhookWinEvent(foregroundHook);
+                    }
+                    if (activeHook != IntPtr.Zero)
+                    {
+                        UnhookWinEvent(activeHook);
                     }
                     if (focusHook != IntPtr.Zero)
                     {
@@ -308,7 +375,17 @@ namespace NightLightTray
                 IntPtr foreground = GetForegroundWindow();
                 outside = foreground != target && GetAncestor(foreground, 2) != target;
             }
-            else if (eventType == EVENT_OBJECT_FOCUS && idObject == OBJID_WINDOW)
+            else if (eventType == EVENT_OBJECT_ACTIVE)
+            {
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid == _ourPid)
+                {
+                    return;
+                }
+                IntPtr root = GetAncestor(hwnd, 2);
+                outside = root != target && root != IntPtr.Zero && hwnd != target;
+            }
+            else if (eventType == EVENT_OBJECT_FOCUS)
             {
                 IntPtr root = GetAncestor(hwnd, 2);
                 outside = root != target && root != IntPtr.Zero && hwnd != target;
@@ -318,6 +395,7 @@ namespace NightLightTray
                 if (hwnd == target)
                 {
                     Interlocked.Exchange(ref _settingsHwnd, IntPtr.Zero);
+                    _closeTimer.Stop();
                     ScheduleGc();
                 }
                 return;
@@ -335,9 +413,7 @@ namespace NightLightTray
             {
                 return;
             }
-            Interlocked.Exchange(ref _settingsHwnd, IntPtr.Zero);
-            PostMessage(target, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            ScheduleGc();
+            CloseSettings(target);
         }
 
         private static void ScheduleGc()
@@ -358,21 +434,6 @@ namespace NightLightTray
             });
             t.IsBackground = true;
             t.Start();
-        }
-
-        private static IntPtr WaitForNewWindow(Dictionary<IntPtr, bool> before, int timeoutMs)
-        {
-            long deadline = Environment.TickCount + timeoutMs;
-            while (Environment.TickCount < deadline)
-            {
-                IntPtr hwnd = FindNewVisibleWindow(before);
-                if (hwnd != IntPtr.Zero)
-                {
-                    return hwnd;
-                }
-                Thread.Sleep(150);
-            }
-            return IntPtr.Zero;
         }
 
         private static Dictionary<IntPtr, bool> SnapshotWindows()
@@ -426,6 +487,35 @@ namespace NightLightTray
             int x = wa.Right - SettingsWidth - 8;
             int y = wa.Bottom - SettingsHeight - 8;
             MoveWindow(hwnd, x, y, SettingsWidth, SettingsHeight, true);
+        }
+
+        private static void FocusWindow(IntPtr hwnd)
+        {
+            try
+            {
+                ShowWindow(hwnd, SW_SHOW);
+                IntPtr foreground = GetForegroundWindow();
+                uint fgThread = GetWindowThreadProcessId(foreground, out _);
+                uint curThread = GetCurrentThreadId();
+                bool attached = false;
+                if (fgThread != 0 && fgThread != curThread)
+                {
+                    attached = AttachThreadInput(fgThread, curThread, true);
+                }
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                SetForegroundWindow(hwnd);
+                SetActiveWindow(hwnd);
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if (attached)
+                {
+                    AttachThreadInput(fgThread, curThread, false);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private void OnPoll(object sender, EventArgs e)
@@ -558,6 +648,35 @@ namespace NightLightTray
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
+        [DllImport("user32.dll")]
+        private static extern bool GetGUIThreadInfo(uint idThread, out GUITHREADINFO lpGuiThreadInfo);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GUITHREADINFO
+        {
+            public uint cbSize;
+            public uint flags;
+            public IntPtr hwndActive;
+            public IntPtr hwndFocus;
+            public IntPtr hwndCapture;
+            public IntPtr hwndMenuOwner;
+            public IntPtr hwndMoveSize;
+            public IntPtr hwndCaret;
+            public RECT rcCaret;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetActiveWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
@@ -607,6 +726,7 @@ namespace NightLightTray
         private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
 
         private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+        private const uint EVENT_OBJECT_ACTIVE = 0x8011;
         private const uint EVENT_OBJECT_FOCUS = 0x8005;
         private const uint EVENT_OBJECT_DESTROY = 0x8001;
         private const int OBJID_WINDOW = 0;
@@ -616,9 +736,12 @@ namespace NightLightTray
         private delegate void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
 
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_SHOWWINDOW = 0x0040;
+        private const int SW_SHOW = 5;
         private const uint WM_CLOSE = 0x0010;
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
