@@ -1,0 +1,21 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+*.pdb
+*.cache
+*.log
+
+# Compiled output
+*.exe
+*.dll
+*.pdb
+
+# Test artifacts
+TestResults/
