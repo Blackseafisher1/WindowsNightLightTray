@@ -39,14 +39,14 @@ namespace NightLightTray
             get { return System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency; }
         }
 
-        public Form1()
+        public Form1(bool alwaysVisible = false)
         {
             InitializeComponent();
             ShowInTaskbar = false;
             WindowState = FormWindowState.Minimized;
             Opacity = 0;
 
-            _alwaysShow = ReadAlwaysShow();
+            _alwaysShow = alwaysVisible || ReadAlwaysShow();
             _lastThemeDark = ThemeManager.IsDark();
 
             _notifyIcon = new NotifyIcon

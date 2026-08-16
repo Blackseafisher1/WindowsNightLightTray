@@ -22,6 +22,8 @@ https://github.com/user-attachments/assets/398b17c0-60a0-4df7-aef5-c4b98b8fdf6d
 - Right-click → `Create shortcut`, copy it, then `Win+R` → `shell:startup` → paste the shortcut there to autostart on boot.
 - It only uses ~0.7 MB idle, so autostart is no problem.
 
+**Fallback flag:** if the on/off detection ever breaks and the icon stays hidden, add `--always` to the shortcut target (e.g. `"C:\...\NightLightTray.exe" --always`) — the icon then stays visible no matter what.
+
 ## Usage
 
 | Action | Effect |
